@@ -9,28 +9,23 @@ import {CharacterNFT} from "../src/CharacterNFT.sol";
 import {CosmeticItems} from "../src/CosmeticItems.sol";
 
 contract EquipmentTest is Test {
-    // ── Contracts ──
     ERC6551Registry registry;
     EquippableAccount accountImpl;
     CharacterNFT character;
     CosmeticItems cosmetics;
 
-    // ── Actors ──
     address alice = makeAddr("alice");
 
-    // ── Slot IDs ──
     bytes32 constant SLOT_HEAD      = keccak256("slot.head");
     bytes32 constant SLOT_BODY      = keccak256("slot.body");
     bytes32 constant SLOT_WEAPON    = keccak256("slot.weapon");
     bytes32 constant SLOT_ACCESSORY = keccak256("slot.accessory");
 
-    // ── Item IDs ──
     uint256 constant ITEM_RED_HOODIE = 1;
     uint256 constant ITEM_GOLD_CHAIN = 2;
     uint256 constant ITEM_KATANA     = 3;
     uint256 constant ITEM_HALO       = 4;
 
-    // ── State ──
     uint256 charTokenId;
     address tbaAddr;
 
@@ -62,9 +57,7 @@ contract EquipmentTest is Test {
         vm.startPrank(alice);
         cosmetics.setApprovalForAll(tbaAddr, true);
 
-        EquippableAccount(payable(tbaAddr)).equip(
-            SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1
-        );
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
 
         assertTrue(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_BODY));
 
@@ -84,10 +77,7 @@ contract EquipmentTest is Test {
         vm.startPrank(alice);
         cosmetics.setApprovalForAll(tbaAddr, true);
 
-        EquippableAccount(payable(tbaAddr)).equip(
-            SLOT_WEAPON, address(cosmetics), ITEM_KATANA, 1
-        );
-
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_WEAPON, address(cosmetics), ITEM_KATANA, 1);
         EquippableAccount(payable(tbaAddr)).unequip(SLOT_WEAPON);
 
         assertFalse(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_WEAPON));
@@ -115,7 +105,7 @@ contract EquipmentTest is Test {
     }
 
     // ─────────────────────────────────────────────
-    //  Edge Cases / Reverts
+    //  Reverts
     // ─────────────────────────────────────────────
 
     function test_RevertEquipOccupiedSlot() public {
@@ -128,9 +118,7 @@ contract EquipmentTest is Test {
         cosmetics.mint(alice, ITEM_RED_HOODIE, 1);
         vm.startPrank(alice);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(EquippableAccount.SlotAlreadyOccupied.selector, SLOT_HEAD)
-        );
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotAlreadyOccupied.selector, SLOT_HEAD));
         EquippableAccount(payable(tbaAddr)).equip(SLOT_HEAD, address(cosmetics), ITEM_RED_HOODIE, 1);
 
         vm.stopPrank();
@@ -138,9 +126,7 @@ contract EquipmentTest is Test {
 
     function test_RevertUnequipEmptySlot() public {
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(EquippableAccount.SlotEmpty.selector, SLOT_HEAD)
-        );
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotEmpty.selector, SLOT_HEAD));
         EquippableAccount(payable(tbaAddr)).unequip(SLOT_HEAD);
     }
 
@@ -149,9 +135,7 @@ contract EquipmentTest is Test {
         vm.startPrank(bob);
 
         vm.expectRevert(EquippableAccount.NotAuthorized.selector);
-        EquippableAccount(payable(tbaAddr)).equip(
-            SLOT_HEAD, address(cosmetics), ITEM_HALO, 1
-        );
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_HEAD, address(cosmetics), ITEM_HALO, 1);
 
         vm.stopPrank();
     }
@@ -187,7 +171,7 @@ contract EquipmentTest is Test {
     }
 
     // ─────────────────────────────────────────────
-    //  Character Ownership Transfer
+    //  Ownership Transfer
     // ─────────────────────────────────────────────
 
     function test_NewOwnerControlsLoadout() public {
@@ -230,10 +214,7 @@ contract EquipmentTest is Test {
         EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
         EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_BODY);
 
-        // Unequip should fail
-        vm.expectRevert(
-            abi.encodeWithSelector(EquippableAccount.SlotIsLocked.selector, SLOT_BODY)
-        );
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotIsLocked.selector, SLOT_BODY));
         EquippableAccount(payable(tbaAddr)).unequip(SLOT_BODY);
 
         vm.stopPrank();
@@ -246,9 +227,7 @@ contract EquipmentTest is Test {
         EquippableAccount(payable(tbaAddr)).equip(SLOT_WEAPON, address(cosmetics), ITEM_KATANA, 1);
         EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_WEAPON);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(EquippableAccount.SlotIsLocked.selector, SLOT_WEAPON)
-        );
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotIsLocked.selector, SLOT_WEAPON));
         EquippableAccount(payable(tbaAddr)).unequip(SLOT_WEAPON);
 
         vm.stopPrank();
@@ -256,10 +235,7 @@ contract EquipmentTest is Test {
 
     function test_RevertLockEmptySlot() public {
         vm.prank(alice);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(EquippableAccount.SlotEmpty.selector, SLOT_HEAD)
-        );
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotEmpty.selector, SLOT_HEAD));
         EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_HEAD);
     }
 
@@ -270,9 +246,7 @@ contract EquipmentTest is Test {
         EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
         EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_BODY);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(EquippableAccount.SlotAlreadyLocked.selector, SLOT_BODY)
-        );
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotAlreadyLocked.selector, SLOT_BODY));
         EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_BODY);
 
         vm.stopPrank();
@@ -299,21 +273,15 @@ contract EquipmentTest is Test {
         EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
         EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_BODY);
 
-        // Transfer character to Bob
         character.transferFrom(alice, bob, charTokenId);
         vm.stopPrank();
 
-        // Bob now owns the character but locked slot remains locked
         assertTrue(EquippableAccount(payable(tbaAddr)).isSlotLocked(SLOT_BODY));
 
-        // Bob cannot unequip the locked slot
         vm.prank(bob);
-        vm.expectRevert(
-            abi.encodeWithSelector(EquippableAccount.SlotIsLocked.selector, SLOT_BODY)
-        );
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotIsLocked.selector, SLOT_BODY));
         EquippableAccount(payable(tbaAddr)).unequip(SLOT_BODY);
 
-        // Item stays in the TBA
         assertEq(cosmetics.balanceOf(tbaAddr, ITEM_RED_HOODIE), 1);
     }
 
@@ -327,6 +295,197 @@ contract EquipmentTest is Test {
         emit IERC6551Equipment.SlotLocked(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE);
 
         EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_BODY);
+
+        vm.stopPrank();
+    }
+
+    function test_LoadoutIncludesLockStatus() public {
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_WEAPON, address(cosmetics), ITEM_KATANA, 1);
+
+        EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_BODY);
+
+        IERC6551Equipment.SlotEntry[] memory loadout =
+            EquippableAccount(payable(tbaAddr)).getLoadout();
+
+        assertEq(loadout.length, 2);
+
+        for (uint256 i; i < loadout.length; i++) {
+            if (loadout[i].slotId == SLOT_BODY) {
+                assertTrue(loadout[i].locked);
+                assertEq(loadout[i].tokenId, ITEM_RED_HOODIE);
+            } else if (loadout[i].slotId == SLOT_WEAPON) {
+                assertFalse(loadout[i].locked);
+                assertEq(loadout[i].tokenId, ITEM_KATANA);
+            }
+        }
+
+        vm.stopPrank();
+    }
+
+    // ─────────────────────────────────────────────
+    //  Batch Operations
+    // ─────────────────────────────────────────────
+
+    function test_EquipBatch() public {
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+
+        bytes32[] memory slotIds = new bytes32[](4);
+        slotIds[0] = SLOT_HEAD;
+        slotIds[1] = SLOT_BODY;
+        slotIds[2] = SLOT_WEAPON;
+        slotIds[3] = SLOT_ACCESSORY;
+
+        address[] memory tokens = new address[](4);
+        tokens[0] = address(cosmetics);
+        tokens[1] = address(cosmetics);
+        tokens[2] = address(cosmetics);
+        tokens[3] = address(cosmetics);
+
+        uint256[] memory tokenIds = new uint256[](4);
+        tokenIds[0] = ITEM_HALO;
+        tokenIds[1] = ITEM_RED_HOODIE;
+        tokenIds[2] = ITEM_KATANA;
+        tokenIds[3] = ITEM_GOLD_CHAIN;
+
+        uint256[] memory amounts = new uint256[](4);
+        amounts[0] = 1;
+        amounts[1] = 1;
+        amounts[2] = 1;
+        amounts[3] = 1;
+
+        EquippableAccount(payable(tbaAddr)).equipBatch(slotIds, tokens, tokenIds, amounts);
+
+        IERC6551Equipment.SlotEntry[] memory loadout =
+            EquippableAccount(payable(tbaAddr)).getLoadout();
+        assertEq(loadout.length, 4);
+
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_HEAD));
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_BODY));
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_WEAPON));
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_ACCESSORY));
+
+        vm.stopPrank();
+    }
+
+    function test_LockSlotsBatch() public {
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_HEAD, address(cosmetics), ITEM_HALO, 1);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_WEAPON, address(cosmetics), ITEM_KATANA, 1);
+
+        bytes32[] memory toLock = new bytes32[](2);
+        toLock[0] = SLOT_HEAD;
+        toLock[1] = SLOT_BODY;
+
+        EquippableAccount(payable(tbaAddr)).lockSlots(toLock);
+
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotLocked(SLOT_HEAD));
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotLocked(SLOT_BODY));
+        assertFalse(EquippableAccount(payable(tbaAddr)).isSlotLocked(SLOT_WEAPON));
+
+        vm.stopPrank();
+    }
+
+    function test_RevertBatchArrayMismatch() public {
+        vm.startPrank(alice);
+
+        bytes32[] memory slotIds = new bytes32[](2);
+        slotIds[0] = SLOT_HEAD;
+        slotIds[1] = SLOT_BODY;
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(cosmetics);
+
+        uint256[] memory tokenIds = new uint256[](2);
+        tokenIds[0] = ITEM_HALO;
+        tokenIds[1] = ITEM_RED_HOODIE;
+
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = 1;
+        amounts[1] = 1;
+
+        vm.expectRevert(EquippableAccount.ArrayLengthMismatch.selector);
+        EquippableAccount(payable(tbaAddr)).equipBatch(slotIds, tokens, tokenIds, amounts);
+
+        vm.stopPrank();
+    }
+
+    function test_BatchEquipAndLockMintFlow() public {
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+
+        // Simulate full mint: batch equip all 4, then batch lock 2
+        bytes32[] memory slotIds = new bytes32[](4);
+        slotIds[0] = SLOT_HEAD;
+        slotIds[1] = SLOT_BODY;
+        slotIds[2] = SLOT_WEAPON;
+        slotIds[3] = SLOT_ACCESSORY;
+
+        address[] memory tokens = new address[](4);
+        tokens[0] = address(cosmetics);
+        tokens[1] = address(cosmetics);
+        tokens[2] = address(cosmetics);
+        tokens[3] = address(cosmetics);
+
+        uint256[] memory tokenIds = new uint256[](4);
+        tokenIds[0] = ITEM_HALO;
+        tokenIds[1] = ITEM_RED_HOODIE;
+        tokenIds[2] = ITEM_KATANA;
+        tokenIds[3] = ITEM_GOLD_CHAIN;
+
+        uint256[] memory amounts = new uint256[](4);
+        amounts[0] = 1;
+        amounts[1] = 1;
+        amounts[2] = 1;
+        amounts[3] = 1;
+
+        // One tx: equip all
+        EquippableAccount(payable(tbaAddr)).equipBatch(slotIds, tokens, tokenIds, amounts);
+
+        // One tx: lock identity traits
+        bytes32[] memory toLock = new bytes32[](2);
+        toLock[0] = SLOT_HEAD;
+        toLock[1] = SLOT_BODY;
+        EquippableAccount(payable(tbaAddr)).lockSlots(toLock);
+
+        // Verify full state
+        IERC6551Equipment.SlotEntry[] memory loadout =
+            EquippableAccount(payable(tbaAddr)).getLoadout();
+        assertEq(loadout.length, 4);
+
+        // Locked slots can't be modified
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotIsLocked.selector, SLOT_HEAD));
+        EquippableAccount(payable(tbaAddr)).unequip(SLOT_HEAD);
+
+        // Unlocked slots can be modified
+        EquippableAccount(payable(tbaAddr)).unequip(SLOT_WEAPON);
+        assertFalse(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_WEAPON));
+
+        vm.stopPrank();
+    }
+
+    function test_RevertBatchLockAlreadyLocked() public {
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_HEAD, address(cosmetics), ITEM_HALO, 1);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
+
+        EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_HEAD);
+
+        bytes32[] memory toLock = new bytes32[](2);
+        toLock[0] = SLOT_HEAD;
+        toLock[1] = SLOT_BODY;
+
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotAlreadyLocked.selector, SLOT_HEAD));
+        EquippableAccount(payable(tbaAddr)).lockSlots(toLock);
 
         vm.stopPrank();
     }
