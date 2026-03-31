@@ -28,7 +28,6 @@ contract EquippableAccount is
     mapping(bytes32 => SlotEntry) private _slots;
     bytes32[] private _occupiedSlots;
     mapping(bytes32 => uint256) private _slotIndex;
-    mapping(bytes32 => bool) private _slotLocked;
 
     // ── Errors ──
 
@@ -38,6 +37,7 @@ contract EquippableAccount is
     error SlotIsLocked(bytes32 slotId);
     error SlotAlreadyLocked(bytes32 slotId);
     error InvalidAmount();
+    error ArrayLengthMismatch();
     error AlreadyInitialized();
 
     // ── Modifiers ──
@@ -102,7 +102,7 @@ contract EquippableAccount is
         require(success, "Execution failed");
     }
 
-    // ── IERC6551Equipment ──
+    // ── IERC6551Equipment — Single Operations ──
 
     function equip(
         bytes32 slotId,
@@ -110,72 +110,43 @@ contract EquippableAccount is
         uint256 tokenId,
         uint256 amount
     ) external override onlyOwner {
-        if (_slotLocked[slotId]) revert SlotIsLocked(slotId);
-        if (_slotIndex[slotId] != 0) revert SlotAlreadyOccupied(slotId);
-        if (amount == 0) revert InvalidAmount();
-
-        if (amount == 1 && _isERC721(tokenContract)) {
-            IERC721(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId);
-        } else {
-            IERC1155(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId, amount, "");
-        }
-
-        _slots[slotId] = SlotEntry({
-            slotId: slotId,
-            tokenContract: tokenContract,
-            tokenId: tokenId,
-            amount: amount
-        });
-
-        _occupiedSlots.push(slotId);
-        _slotIndex[slotId] = _occupiedSlots.length;
-
-        ++_state;
-
-        emit Equipped(slotId, tokenContract, tokenId, amount);
+        _equip(slotId, tokenContract, tokenId, amount);
     }
 
     function unequip(bytes32 slotId) external override onlyOwner {
-        if (_slotLocked[slotId]) revert SlotIsLocked(slotId);
-
-        uint256 idx = _slotIndex[slotId];
-        if (idx == 0) revert SlotEmpty(slotId);
-
-        SlotEntry memory entry = _slots[slotId];
-
-        if (entry.amount == 1 && _isERC721(entry.tokenContract)) {
-            IERC721(entry.tokenContract).safeTransferFrom(address(this), msg.sender, entry.tokenId);
-        } else {
-            IERC1155(entry.tokenContract).safeTransferFrom(
-                address(this), msg.sender, entry.tokenId, entry.amount, ""
-            );
-        }
-
-        uint256 lastIdx = _occupiedSlots.length - 1;
-        if (idx - 1 != lastIdx) {
-            bytes32 lastSlot = _occupiedSlots[lastIdx];
-            _occupiedSlots[idx - 1] = lastSlot;
-            _slotIndex[lastSlot] = idx;
-        }
-        _occupiedSlots.pop();
-        delete _slotIndex[slotId];
-        delete _slots[slotId];
-
-        ++_state;
-
-        emit Unequipped(slotId, entry.tokenContract, entry.tokenId, entry.amount);
+        _unequip(slotId);
     }
 
     function lockSlot(bytes32 slotId) external override onlyOwner {
-        if (_slotIndex[slotId] == 0) revert SlotEmpty(slotId);
-        if (_slotLocked[slotId]) revert SlotAlreadyLocked(slotId);
-
-        _slotLocked[slotId] = true;
-        ++_state;
-
-        SlotEntry memory entry = _slots[slotId];
-        emit SlotLocked(slotId, entry.tokenContract, entry.tokenId);
+        _lockSlot(slotId);
     }
+
+    // ── IERC6551Equipment — Batch Operations ──
+
+    function equipBatch(
+        bytes32[] calldata slotIds,
+        address[] calldata tokenContracts,
+        uint256[] calldata tokenIds,
+        uint256[] calldata amounts
+    ) external override onlyOwner {
+        if (
+            slotIds.length != tokenContracts.length ||
+            slotIds.length != tokenIds.length ||
+            slotIds.length != amounts.length
+        ) revert ArrayLengthMismatch();
+
+        for (uint256 i; i < slotIds.length; ++i) {
+            _equip(slotIds[i], tokenContracts[i], tokenIds[i], amounts[i]);
+        }
+    }
+
+    function lockSlots(bytes32[] calldata slotIds) external override onlyOwner {
+        for (uint256 i; i < slotIds.length; ++i) {
+            _lockSlot(slotIds[i]);
+        }
+    }
+
+    // ── IERC6551Equipment — Views ──
 
     function getEquipped(bytes32 slotId)
         external
@@ -205,7 +176,7 @@ contract EquippableAccount is
     }
 
     function isSlotLocked(bytes32 slotId) external view override returns (bool) {
-        return _slotLocked[slotId];
+        return _slots[slotId].locked;
     }
 
     // ── ERC-165 ──
@@ -224,6 +195,80 @@ contract EquippableAccount is
     }
 
     // ── Internal ──
+
+    function _equip(
+        bytes32 slotId,
+        address tokenContract,
+        uint256 tokenId,
+        uint256 amount
+    ) internal {
+        if (_slots[slotId].locked) revert SlotIsLocked(slotId);
+        if (_slotIndex[slotId] != 0) revert SlotAlreadyOccupied(slotId);
+        if (amount == 0) revert InvalidAmount();
+
+        if (amount == 1 && _isERC721(tokenContract)) {
+            IERC721(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId);
+        } else {
+            IERC1155(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId, amount, "");
+        }
+
+        _slots[slotId] = SlotEntry({
+            slotId: slotId,
+            tokenContract: tokenContract,
+            tokenId: tokenId,
+            amount: amount,
+            locked: false
+        });
+
+        _occupiedSlots.push(slotId);
+        _slotIndex[slotId] = _occupiedSlots.length;
+
+        ++_state;
+
+        emit Equipped(slotId, tokenContract, tokenId, amount);
+    }
+
+    function _unequip(bytes32 slotId) internal {
+        if (_slots[slotId].locked) revert SlotIsLocked(slotId);
+
+        uint256 idx = _slotIndex[slotId];
+        if (idx == 0) revert SlotEmpty(slotId);
+
+        SlotEntry memory entry = _slots[slotId];
+
+        if (entry.amount == 1 && _isERC721(entry.tokenContract)) {
+            IERC721(entry.tokenContract).safeTransferFrom(address(this), msg.sender, entry.tokenId);
+        } else {
+            IERC1155(entry.tokenContract).safeTransferFrom(
+                address(this), msg.sender, entry.tokenId, entry.amount, ""
+            );
+        }
+
+        uint256 lastIdx = _occupiedSlots.length - 1;
+        if (idx - 1 != lastIdx) {
+            bytes32 lastSlot = _occupiedSlots[lastIdx];
+            _occupiedSlots[idx - 1] = lastSlot;
+            _slotIndex[lastSlot] = idx;
+        }
+        _occupiedSlots.pop();
+        delete _slotIndex[slotId];
+        delete _slots[slotId];
+
+        ++_state;
+
+        emit Unequipped(slotId, entry.tokenContract, entry.tokenId, entry.amount);
+    }
+
+    function _lockSlot(bytes32 slotId) internal {
+        if (_slotIndex[slotId] == 0) revert SlotEmpty(slotId);
+        if (_slots[slotId].locked) revert SlotAlreadyLocked(slotId);
+
+        _slots[slotId].locked = true;
+        ++_state;
+
+        SlotEntry memory entry = _slots[slotId];
+        emit SlotLocked(slotId, entry.tokenContract, entry.tokenId);
+    }
 
     function _isValidSigner(address signer) internal view returns (bool) {
         if (_chainId != block.chainid) return false;
