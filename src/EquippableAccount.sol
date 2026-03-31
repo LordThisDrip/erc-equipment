@@ -28,12 +28,15 @@ contract EquippableAccount is
     mapping(bytes32 => SlotEntry) private _slots;
     bytes32[] private _occupiedSlots;
     mapping(bytes32 => uint256) private _slotIndex;
+    mapping(bytes32 => bool) private _slotLocked;
 
     // ── Errors ──
 
     error NotAuthorized();
     error SlotAlreadyOccupied(bytes32 slotId);
     error SlotEmpty(bytes32 slotId);
+    error SlotIsLocked(bytes32 slotId);
+    error SlotAlreadyLocked(bytes32 slotId);
     error InvalidAmount();
     error AlreadyInitialized();
 
@@ -107,6 +110,7 @@ contract EquippableAccount is
         uint256 tokenId,
         uint256 amount
     ) external override onlyOwner {
+        if (_slotLocked[slotId]) revert SlotIsLocked(slotId);
         if (_slotIndex[slotId] != 0) revert SlotAlreadyOccupied(slotId);
         if (amount == 0) revert InvalidAmount();
 
@@ -132,6 +136,8 @@ contract EquippableAccount is
     }
 
     function unequip(bytes32 slotId) external override onlyOwner {
+        if (_slotLocked[slotId]) revert SlotIsLocked(slotId);
+
         uint256 idx = _slotIndex[slotId];
         if (idx == 0) revert SlotEmpty(slotId);
 
@@ -160,6 +166,17 @@ contract EquippableAccount is
         emit Unequipped(slotId, entry.tokenContract, entry.tokenId, entry.amount);
     }
 
+    function lockSlot(bytes32 slotId) external override onlyOwner {
+        if (_slotIndex[slotId] == 0) revert SlotEmpty(slotId);
+        if (_slotLocked[slotId]) revert SlotAlreadyLocked(slotId);
+
+        _slotLocked[slotId] = true;
+        ++_state;
+
+        SlotEntry memory entry = _slots[slotId];
+        emit SlotLocked(slotId, entry.tokenContract, entry.tokenId);
+    }
+
     function getEquipped(bytes32 slotId)
         external
         view
@@ -185,6 +202,10 @@ contract EquippableAccount is
 
     function isSlotOccupied(bytes32 slotId) external view override returns (bool) {
         return _slotIndex[slotId] != 0;
+    }
+
+    function isSlotLocked(bytes32 slotId) external view override returns (bool) {
+        return _slotLocked[slotId];
     }
 
     // ── ERC-165 ──
