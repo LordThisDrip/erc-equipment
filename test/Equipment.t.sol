@@ -7,6 +7,7 @@ import {ERC6551Registry} from "../src/ERC6551Registry.sol";
 import {EquippableAccount} from "../src/EquippableAccount.sol";
 import {CharacterNFT} from "../src/CharacterNFT.sol";
 import {CosmeticItems} from "../src/CosmeticItems.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
 contract EquipmentTest is Test {
     ERC6551Registry registry;
@@ -421,7 +422,6 @@ contract EquipmentTest is Test {
         vm.startPrank(alice);
         cosmetics.setApprovalForAll(tbaAddr, true);
 
-        // Simulate full mint: batch equip all 4, then batch lock 2
         bytes32[] memory slotIds = new bytes32[](4);
         slotIds[0] = SLOT_HEAD;
         slotIds[1] = SLOT_BODY;
@@ -446,25 +446,20 @@ contract EquipmentTest is Test {
         amounts[2] = 1;
         amounts[3] = 1;
 
-        // One tx: equip all
         EquippableAccount(payable(tbaAddr)).equipBatch(slotIds, tokens, tokenIds, amounts);
 
-        // One tx: lock identity traits
         bytes32[] memory toLock = new bytes32[](2);
         toLock[0] = SLOT_HEAD;
         toLock[1] = SLOT_BODY;
         EquippableAccount(payable(tbaAddr)).lockSlots(toLock);
 
-        // Verify full state
         IERC6551Equipment.SlotEntry[] memory loadout =
             EquippableAccount(payable(tbaAddr)).getLoadout();
         assertEq(loadout.length, 4);
 
-        // Locked slots can't be modified
         vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotIsLocked.selector, SLOT_HEAD));
         EquippableAccount(payable(tbaAddr)).unequip(SLOT_HEAD);
 
-        // Unlocked slots can be modified
         EquippableAccount(payable(tbaAddr)).unequip(SLOT_WEAPON);
         assertFalse(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_WEAPON));
 
@@ -486,6 +481,86 @@ contract EquipmentTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotAlreadyLocked.selector, SLOT_HEAD));
         EquippableAccount(payable(tbaAddr)).lockSlots(toLock);
+
+        vm.stopPrank();
+    }
+
+    // ─────────────────────────────────────────────
+    //  ERC-165 Support
+    // ─────────────────────────────────────────────
+
+    function test_SupportsEquipmentInterface() public view {
+        assertTrue(
+            EquippableAccount(payable(tbaAddr)).supportsInterface(type(IERC6551Equipment).interfaceId),
+            "Must support IERC6551Equipment"
+        );
+    }
+
+    function test_SupportsERC165() public view {
+        assertTrue(
+            EquippableAccount(payable(tbaAddr)).supportsInterface(type(IERC165).interfaceId),
+            "Must support IERC165"
+        );
+    }
+
+    // ─────────────────────────────────────────────
+    //  State Consistency After Equip (CEI verification)
+    // ─────────────────────────────────────────────
+
+    function test_SlotOccupiedBeforeTransferCompletes() public {
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+
+        // Equip — state should be updated even though transfer happens after
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
+
+        // Verify state is consistent
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_BODY));
+        (address tc, uint256 tid, uint256 amt) =
+            EquippableAccount(payable(tbaAddr)).getEquipped(SLOT_BODY);
+        assertEq(tc, address(cosmetics));
+        assertEq(tid, ITEM_RED_HOODIE);
+        assertEq(amt, 1);
+
+        // Verify token actually transferred
+        assertEq(cosmetics.balanceOf(tbaAddr, ITEM_RED_HOODIE), 1);
+
+        vm.stopPrank();
+    }
+
+    function test_NewOwnerCanEquipUnlockedSlotAfterTransfer() public {
+        address bob = makeAddr("bob");
+
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+
+        // Equip and lock body, equip weapon (unlocked)
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_WEAPON, address(cosmetics), ITEM_KATANA, 1);
+        EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_BODY);
+
+        // Transfer to Bob
+        character.transferFrom(alice, bob, charTokenId);
+        vm.stopPrank();
+
+        // Bob can unequip unlocked weapon
+        vm.startPrank(bob);
+        EquippableAccount(payable(tbaAddr)).unequip(SLOT_WEAPON);
+        assertEq(cosmetics.balanceOf(bob, ITEM_KATANA), 1);
+
+        // Bob can equip something new to the weapon slot
+        cosmetics.setApprovalForAll(tbaAddr, true);
+        vm.stopPrank();
+        cosmetics.mint(bob, ITEM_GOLD_CHAIN, 1);
+        vm.startPrank(bob);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_WEAPON, address(cosmetics), ITEM_GOLD_CHAIN, 1);
+
+        // Verify
+        (address tc,, ) = EquippableAccount(payable(tbaAddr)).getEquipped(SLOT_WEAPON);
+        assertEq(tc, address(cosmetics));
+
+        // Body still locked
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotLocked(SLOT_BODY));
 
         vm.stopPrank();
     }
