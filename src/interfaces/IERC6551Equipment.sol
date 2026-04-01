@@ -13,6 +13,8 @@ pragma solidity ^0.8.24;
 ///         Slots may be permanently locked, making them immutable across
 ///         ownership transfers. Locked means locked forever — there is no
 ///         unlock mechanism by design.
+///
+///         The ERC-165 identifier for this interface is 0xd38f0891.
 
 interface IERC6551Equipment {
 
