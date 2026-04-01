@@ -190,28 +190,29 @@ contract EquippableAccount is
         return
             interfaceId == type(IERC6551Account).interfaceId ||
             interfaceId == type(IERC6551Executable).interfaceId ||
+            interfaceId == type(IERC6551Equipment).interfaceId ||
             interfaceId == type(IERC165).interfaceId ||
             super.supportsInterface(interfaceId);
     }
 
     // ── Internal ──
 
+    /// @dev Follows checks-effects-interactions pattern:
+    ///      1. Checks (revert conditions)
+    ///      2. Effects (state updates)
+    ///      3. Interactions (external calls / token transfers)
     function _equip(
         bytes32 slotId,
         address tokenContract,
         uint256 tokenId,
         uint256 amount
     ) internal {
+        // ── Checks ──
         if (_slots[slotId].locked) revert SlotIsLocked(slotId);
         if (_slotIndex[slotId] != 0) revert SlotAlreadyOccupied(slotId);
         if (amount == 0) revert InvalidAmount();
 
-        if (amount == 1 && _isERC721(tokenContract)) {
-            IERC721(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId);
-        } else {
-            IERC1155(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId, amount, "");
-        }
-
+        // ── Effects (state updates BEFORE external calls) ──
         _slots[slotId] = SlotEntry({
             slotId: slotId,
             tokenContract: tokenContract,
@@ -225,25 +226,27 @@ contract EquippableAccount is
 
         ++_state;
 
+        // ── Interactions (external calls AFTER state updates) ──
+        if (amount == 1 && _isERC721(tokenContract)) {
+            IERC721(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId);
+        } else {
+            IERC1155(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId, amount, "");
+        }
+
         emit Equipped(slotId, tokenContract, tokenId, amount);
     }
 
+    /// @dev Follows checks-effects-interactions pattern.
     function _unequip(bytes32 slotId) internal {
+        // ── Checks ──
         if (_slots[slotId].locked) revert SlotIsLocked(slotId);
-
         uint256 idx = _slotIndex[slotId];
         if (idx == 0) revert SlotEmpty(slotId);
 
+        // ── Cache before deleting ──
         SlotEntry memory entry = _slots[slotId];
 
-        if (entry.amount == 1 && _isERC721(entry.tokenContract)) {
-            IERC721(entry.tokenContract).safeTransferFrom(address(this), msg.sender, entry.tokenId);
-        } else {
-            IERC1155(entry.tokenContract).safeTransferFrom(
-                address(this), msg.sender, entry.tokenId, entry.amount, ""
-            );
-        }
-
+        // ── Effects ──
         uint256 lastIdx = _occupiedSlots.length - 1;
         if (idx - 1 != lastIdx) {
             bytes32 lastSlot = _occupiedSlots[lastIdx];
@@ -255,6 +258,15 @@ contract EquippableAccount is
         delete _slots[slotId];
 
         ++_state;
+
+        // ── Interactions ──
+        if (entry.amount == 1 && _isERC721(entry.tokenContract)) {
+            IERC721(entry.tokenContract).safeTransferFrom(address(this), msg.sender, entry.tokenId);
+        } else {
+            IERC1155(entry.tokenContract).safeTransferFrom(
+                address(this), msg.sender, entry.tokenId, entry.amount, ""
+            );
+        }
 
         emit Unequipped(slotId, entry.tokenContract, entry.tokenId, entry.amount);
     }

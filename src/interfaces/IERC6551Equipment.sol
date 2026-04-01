@@ -5,8 +5,14 @@ pragma solidity ^0.8.24;
 /// @notice A standard interface for equipping, unequipping, and permanently
 ///         locking tokens within ERC-6551 Token Bound Accounts using named slots.
 /// @dev    Slots are identified by bytes32 keys, allowing any application to
-///         define its own slot taxonomy. Slots may be permanently locked,
-///         making them immutable across ownership transfers.
+///         define its own slot taxonomy. The recommended convention is
+///         keccak256("slot.<name>"). Applications sharing a TBA across contexts
+///         SHOULD namespace slots to avoid collisions, e.g.
+///         keccak256("myapp.slot.head") vs keccak256("otherapp.slot.head").
+///
+///         Slots may be permanently locked, making them immutable across
+///         ownership transfers. Locked means locked forever — there is no
+///         unlock mechanism by design.
 
 interface IERC6551Equipment {
 
