@@ -15,7 +15,7 @@ contract DeployEquipment is Script {
         ERC6551Registry registry = new ERC6551Registry();
         console2.log("Registry:", address(registry));
 
-        EquippableAccount accountImpl = new EquippableAccount();
+        EquippableAccount accountImpl = new EquippableAccount(address(registry));
         console2.log("Account Impl:", address(accountImpl));
 
         CharacterNFT character = new CharacterNFT(
