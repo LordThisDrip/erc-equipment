@@ -8,6 +8,8 @@ import {EquippableAccount} from "../src/EquippableAccount.sol";
 import {CharacterNFT} from "../src/CharacterNFT.sol";
 import {CosmeticItems} from "../src/CosmeticItems.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {IERC1155} from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 
 contract EquipmentTest is Test {
     ERC6551Registry registry;
@@ -32,7 +34,7 @@ contract EquipmentTest is Test {
 
     function setUp() public {
         registry = new ERC6551Registry();
-        accountImpl = new EquippableAccount();
+        accountImpl = new EquippableAccount(address(registry));
         character = new CharacterNFT(address(registry), address(accountImpl));
         cosmetics = new CosmeticItems();
 
@@ -563,5 +565,147 @@ contract EquipmentTest is Test {
         assertTrue(EquippableAccount(payable(tbaAddr)).isSlotLocked(SLOT_BODY));
 
         vm.stopPrank();
+    }
+
+    // ─────────────────────────────────────────────
+    //  Bug Fix #1: Lock Bypass via execute()
+    // ─────────────────────────────────────────────
+
+    function test_RevertExecuteBypassesLockedSlot() public {
+        address attacker = makeAddr("attacker");
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
+        EquippableAccount(payable(tbaAddr)).lockSlot(SLOT_BODY);
+
+        bytes memory transferData = abi.encodeWithSelector(
+            IERC1155.safeTransferFrom.selector, tbaAddr, attacker, ITEM_RED_HOODIE, uint256(1), bytes("")
+        );
+
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotIntegrityViolated.selector, SLOT_BODY));
+        EquippableAccount(payable(tbaAddr)).execute(address(cosmetics), 0, transferData, 0);
+
+        assertEq(cosmetics.balanceOf(tbaAddr, ITEM_RED_HOODIE), 1);
+        assertEq(cosmetics.balanceOf(attacker, ITEM_RED_HOODIE), 0);
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotLocked(SLOT_BODY));
+        vm.stopPrank();
+    }
+
+    function test_RevertExecuteBypassesUnlockedEquipment() public {
+        address recipient = makeAddr("recipient");
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_WEAPON, address(cosmetics), ITEM_KATANA, 1);
+
+        bytes memory transferData = abi.encodeWithSelector(
+            IERC1155.safeTransferFrom.selector, tbaAddr, recipient, ITEM_KATANA, uint256(1), bytes("")
+        );
+
+        vm.expectRevert(abi.encodeWithSelector(EquippableAccount.SlotIntegrityViolated.selector, SLOT_WEAPON));
+        EquippableAccount(payable(tbaAddr)).execute(address(cosmetics), 0, transferData, 0);
+
+        assertEq(cosmetics.balanceOf(tbaAddr, ITEM_KATANA), 1);
+        vm.stopPrank();
+    }
+
+    function test_ExecuteCanTransferUnequippedTokens() public {
+        address recipient = makeAddr("recipient");
+        cosmetics.mint(tbaAddr, ITEM_GOLD_CHAIN, 1);
+        assertEq(cosmetics.balanceOf(tbaAddr, ITEM_GOLD_CHAIN), 1);
+
+        bytes memory transferData = abi.encodeWithSelector(
+            IERC1155.safeTransferFrom.selector, tbaAddr, recipient, ITEM_GOLD_CHAIN, uint256(1), bytes("")
+        );
+
+        vm.prank(alice);
+        EquippableAccount(payable(tbaAddr)).execute(address(cosmetics), 0, transferData, 0);
+
+        assertEq(cosmetics.balanceOf(tbaAddr, ITEM_GOLD_CHAIN), 0);
+        assertEq(cosmetics.balanceOf(recipient, ITEM_GOLD_CHAIN), 1);
+    }
+
+    function test_RevertExecuteWithMultipleEquippedSlots() public {
+        address attacker = makeAddr("attacker");
+        vm.startPrank(alice);
+        cosmetics.setApprovalForAll(tbaAddr, true);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_HEAD, address(cosmetics), ITEM_HALO, 1);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(cosmetics), ITEM_RED_HOODIE, 1);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_WEAPON, address(cosmetics), ITEM_KATANA, 1);
+
+        bytes memory transferData = abi.encodeWithSelector(
+            IERC1155.safeTransferFrom.selector, tbaAddr, attacker, ITEM_KATANA, uint256(1), bytes("")
+        );
+
+        vm.expectRevert();
+        EquippableAccount(payable(tbaAddr)).execute(address(cosmetics), 0, transferData, 0);
+
+        assertEq(cosmetics.balanceOf(tbaAddr, ITEM_HALO), 1);
+        assertEq(cosmetics.balanceOf(tbaAddr, ITEM_RED_HOODIE), 1);
+        assertEq(cosmetics.balanceOf(tbaAddr, ITEM_KATANA), 1);
+        vm.stopPrank();
+    }
+
+    // ─────────────────────────────────────────────
+    //  Bug Fix #2: initialize() Access Control
+    // ─────────────────────────────────────────────
+
+    function test_RevertInitializeNonRegistry() public {
+        EquippableAccount impl = new EquippableAccount(address(registry));
+        vm.expectRevert(EquippableAccount.NotRegistry.selector);
+        impl.initialize(block.chainid, address(character), 999);
+    }
+
+    function test_RegistryCanInitializeClones() public {
+        address newAcct = registry.createAccount(
+            address(accountImpl), bytes32(uint256(42)), block.chainid, address(character), charTokenId
+        );
+        (uint256 chainId, address tokenContract, uint256 tokenId) =
+            EquippableAccount(payable(newAcct)).token();
+        assertEq(chainId, block.chainid);
+        assertEq(tokenContract, address(character));
+        assertEq(tokenId, charTokenId);
+    }
+
+    // ─────────────────────────────────────────────
+    //  Minor Fixes: Type Detection & Interface ID
+    // ─────────────────────────────────────────────
+
+    function test_RevertEquipERC721WithAmountGreaterThanOne() public {
+        MockERC721 mock = new MockERC721();
+        mock.mint(alice, 1);
+        vm.startPrank(alice);
+        mock.setApprovalForAll(tbaAddr, true);
+        vm.expectRevert(EquippableAccount.InvalidAmount.selector);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(mock), 1, 2);
+        vm.stopPrank();
+    }
+
+    function test_RevertEquipInvalidTokenType() public {
+        vm.startPrank(alice);
+        vm.expectRevert(EquippableAccount.InvalidTokenType.selector);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_BODY, address(this), 1, 1);
+        vm.stopPrank();
+    }
+
+    function test_EquipERC721Successfully() public {
+        MockERC721 mock = new MockERC721();
+        mock.mint(alice, 42);
+        vm.startPrank(alice);
+        mock.setApprovalForAll(tbaAddr, true);
+        EquippableAccount(payable(tbaAddr)).equip(SLOT_HEAD, address(mock), 42, 1);
+        assertTrue(EquippableAccount(payable(tbaAddr)).isSlotOccupied(SLOT_HEAD));
+        assertEq(mock.ownerOf(42), tbaAddr);
+        vm.stopPrank();
+    }
+
+    function test_InterfaceIdMatchesSpec() public pure {
+        assertEq(type(IERC6551Equipment).interfaceId, bytes4(0xd38f0891));
+    }
+}
+
+contract MockERC721 is ERC721 {
+    constructor() ERC721("Mock721", "MOCK") {}
+    function mint(address to, uint256 tokenId) external {
+        _mint(to, tokenId);
     }
 }

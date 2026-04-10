@@ -10,6 +10,15 @@ import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 
+/// @title  EquippableAccount — ERC-6551 Token Bound Account with ERC-8216 Equipment Slots
+/// @notice Reference implementation of the IERC6551Equipment interface, providing
+///         slot-based equipment management with permanent locking and tamper-resistant
+///         enforcement at the execute() layer.
+/// @dev    Bug Fix Package v1.1 (2026-04-10) — Phantoma Foundation Review
+///         - Fix #1 (CRITICAL): Lock bypass via execute() — added _verifyEquipmentInvariant()
+///         - Fix #2 (Defense-in-depth): Unprotected initialize() — added msg.sender == REGISTRY check
+///         - Fix #3 (Minor): Cleaner errors for invalid token types via explicit type detection
+///         - Fix #4 (Minor): Added _isERC1155 detector for symmetric type detection
 contract EquippableAccount is
     IERC6551Account,
     IERC6551Executable,
@@ -17,6 +26,15 @@ contract EquippableAccount is
     ERC1155Holder,
     ERC721Holder
 {
+    // ── Immutables ──
+
+    /// @notice The registry authorized to call initialize() on this implementation.
+    /// @dev    Set in constructor. Bytecode-baked, so all minimal proxy clones see the
+    ///         same value via delegatecall. Defense-in-depth: even though our Registry
+    ///         currently initializes atomically with cloneDeterministic, this check
+    ///         ensures no future deployment pattern can leave a window for front-running.
+    address public immutable REGISTRY;
+
     // ── Storage ──
 
     uint256 private _state;
@@ -32,11 +50,14 @@ contract EquippableAccount is
     // ── Errors ──
 
     error NotAuthorized();
+    error NotRegistry();
     error SlotAlreadyOccupied(bytes32 slotId);
     error SlotEmpty(bytes32 slotId);
     error SlotIsLocked(bytes32 slotId);
     error SlotAlreadyLocked(bytes32 slotId);
+    error SlotIntegrityViolated(bytes32 slotId);
     error InvalidAmount();
+    error InvalidTokenType();
     error ArrayLengthMismatch();
     error AlreadyInitialized();
 
@@ -47,9 +68,19 @@ contract EquippableAccount is
         _;
     }
 
+    // ── Constructor ──
+
+    /// @param registry_ Address of the registry authorized to initialize clones of this
+    ///                  implementation. Should be the canonical ERC-6551 Registry singleton
+    ///                  (0x000000006551c19487814612e58FE06813775758) for production deploys.
+    constructor(address registry_) {
+        REGISTRY = registry_;
+    }
+
     // ── Initializer ──
 
     function initialize(uint256 chainId_, address tokenContract_, uint256 tokenId_) external {
+        if (msg.sender != REGISTRY) revert NotRegistry();
         if (_initialized) revert AlreadyInitialized();
         _initialized = true;
         _chainId = chainId_;
@@ -88,6 +119,15 @@ contract EquippableAccount is
 
     // ── ERC-6551 Execution ──
 
+    /// @notice Execute an arbitrary call on behalf of the TBA.
+    /// @dev    After every successful call, verifies that all equipped tokens
+    ///         (locked or unlocked) are still physically held by this account.
+    ///         This is the enforcement layer that prevents bypassing slot locks
+    ///         via direct token transfers initiated through execute().
+    ///
+    ///         Without this check, an owner could call execute() with safeTransferFrom
+    ///         data to drain a locked slot's underlying token, breaking the lock guarantee
+    ///         of ERC-8216 and turning the on-chain equipment record into a lie.
     function execute(
         address to,
         uint256 value,
@@ -100,6 +140,11 @@ contract EquippableAccount is
         bool success;
         (success, result) = to.call{value: value}(data);
         require(success, "Execution failed");
+
+        // ── Equipment Integrity Check ──
+        // Verify all equipped tokens remain in the account after execution.
+        // This is the enforcement mechanism for slot locks at the execute() layer.
+        _verifyEquipmentInvariant();
     }
 
     // ── IERC6551Equipment — Single Operations ──
@@ -195,12 +240,17 @@ contract EquippableAccount is
             super.supportsInterface(interfaceId);
     }
 
-    // ── Internal ──
+    // ── Internal: Equipment Logic ──
 
     /// @dev Follows checks-effects-interactions pattern:
     ///      1. Checks (revert conditions)
     ///      2. Effects (state updates)
     ///      3. Interactions (external calls / token transfers)
+    ///
+    ///      Token type detection happens in the interactions phase to preserve CEI
+    ///      ordering. Re-entry from a malicious tokenContract during type detection
+    ///      is gated by onlyOwner and the SlotAlreadyOccupied check (re-entry to the
+    ///      same slot would fail because state has already been written).
     function _equip(
         bytes32 slotId,
         address tokenContract,
@@ -227,7 +277,13 @@ contract EquippableAccount is
         ++_state;
 
         // ── Interactions (external calls AFTER state updates) ──
-        if (amount == 1 && _isERC721(tokenContract)) {
+        bool isERC721 = _isERC721(tokenContract);
+        bool isERC1155 = !isERC721 && _isERC1155(tokenContract);
+
+        if (!isERC721 && !isERC1155) revert InvalidTokenType();
+        if (isERC721 && amount != 1) revert InvalidAmount();
+
+        if (isERC721) {
             IERC721(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId);
         } else {
             IERC1155(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId, amount, "");
@@ -282,6 +338,8 @@ contract EquippableAccount is
         emit SlotLocked(slotId, entry.tokenContract, entry.tokenId);
     }
 
+    // ── Internal: Validation ──
+
     function _isValidSigner(address signer) internal view returns (bool) {
         if (_chainId != block.chainid) return false;
         return IERC721(_tokenContract).ownerOf(_tokenId) == signer;
@@ -292,6 +350,40 @@ contract EquippableAccount is
             return result;
         } catch {
             return false;
+        }
+    }
+
+    function _isERC1155(address tokenContract) internal view returns (bool) {
+        try IERC165(tokenContract).supportsInterface(type(IERC1155).interfaceId) returns (bool result) {
+            return result;
+        } catch {
+            return false;
+        }
+    }
+
+    /// @dev Reverts if any equipped token is no longer physically held by this account.
+    ///      Called after execute() to enforce slot integrity at the execution layer.
+    ///      Iterates over _occupiedSlots and verifies via ownerOf (ERC-721) or
+    ///      balanceOf (ERC-1155) that the recorded token is still present.
+    ///
+    ///      Gas cost: ~30k per occupied slot (one external call each).
+    ///      For a typical 10-slot character: ~300k gas overhead per execute().
+    ///      For a maximalist 50-slot character: ~1.5M gas overhead per execute().
+    function _verifyEquipmentInvariant() internal view {
+        uint256 len = _occupiedSlots.length;
+        for (uint256 i; i < len; ++i) {
+            bytes32 slotId = _occupiedSlots[i];
+            SlotEntry memory entry = _slots[slotId];
+
+            if (_isERC721(entry.tokenContract)) {
+                if (IERC721(entry.tokenContract).ownerOf(entry.tokenId) != address(this)) {
+                    revert SlotIntegrityViolated(slotId);
+                }
+            } else {
+                if (IERC1155(entry.tokenContract).balanceOf(address(this), entry.tokenId) < entry.amount) {
+                    revert SlotIntegrityViolated(slotId);
+                }
+            }
         }
     }
 }
