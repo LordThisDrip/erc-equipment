@@ -1044,6 +1044,45 @@ contract EquipmentTest is Test {
     }
 
     // ─────────────────────────────────────────────
+    //  CharacterNFT — parent-driven mint-time flow
+    // ─────────────────────────────────────────────
+
+    /// @dev Demonstrates the v1.2 mint-time flow end-to-end:
+    ///      caller mints the founder item to the predicted TBA address,
+    ///      then CharacterNFT.mintWithBoundEquipment atomically (a) mints
+    ///      the parent NFT, (b) deploys the deterministic-address TBA,
+    ///      (c) calls equipAndLockAtMint — emitting both Equipped and
+    ///      SlotLocked. The slot is occupied and locked from block one.
+    function test_CharacterNFT_MintWithBoundEquipment() public {
+        address recipient = makeAddr("recipient");
+
+        // The next character tokenId is 1 (alice already minted #0 in setUp)
+        uint256 nextCharId = 1;
+
+        address predictedTba = registry.account(
+            address(accountImpl), bytes32(0), block.chainid, address(character), nextCharId
+        );
+
+        // Pre-mint the founder halo to the predicted TBA address.
+        cosmetics.mint(predictedTba, ITEM_HALO, 1);
+
+        vm.expectEmit(true, true, true, true);
+        emit IERC6551Equipment.Equipped(SLOT_HEAD, address(cosmetics), ITEM_HALO, 1);
+        vm.expectEmit(true, true, false, true);
+        emit IERC6551Equipment.SlotLocked(SLOT_HEAD, address(cosmetics), ITEM_HALO);
+
+        (uint256 newId, address tba) = character.mintWithBoundEquipment(
+            recipient, address(cosmetics), ITEM_HALO, SLOT_HEAD
+        );
+
+        assertEq(newId, nextCharId);
+        assertEq(tba, predictedTba);
+        assertEq(character.ownerOf(newId), recipient);
+        assertTrue(EquippableAccount(payable(tba)).isSlotOccupied(SLOT_HEAD));
+        assertTrue(EquippableAccount(payable(tba)).isSlotLocked(SLOT_HEAD));
+    }
+
+    // ─────────────────────────────────────────────
     //  ERC-721 amount validation
     // ─────────────────────────────────────────────
 
