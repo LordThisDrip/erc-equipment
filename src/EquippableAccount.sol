@@ -11,14 +11,37 @@ import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 
 /// @title  EquippableAccount — ERC-6551 Token Bound Account with ERC-8216 Equipment Slots
-/// @notice Reference implementation of the IERC6551Equipment interface, providing
-///         slot-based equipment management with permanent locking and tamper-resistant
+/// @notice Reference implementation of the IERC6551Equipment interface (v1.2),
+///         providing slot-based equipment management with permanent locking,
+///         mint-time and balance-only equip operations, and tamper-resistant
 ///         enforcement at the execute() layer.
-/// @dev    Bug Fix Package v1.1 (2026-04-10) — Phantoma Foundation Review
-///         - Fix #1 (CRITICAL): Lock bypass via execute() — added _verifyEquipmentInvariant()
-///         - Fix #2 (Defense-in-depth): Unprotected initialize() — added msg.sender == REGISTRY check
-///         - Fix #3 (Minor): Cleaner errors for invalid token types via explicit type detection
-///         - Fix #4 (Minor): Added _isERC1155 detector for symmetric type detection
+/// @dev    ERC-8216 v1.2 (2026-04-28)
+///         - Adds equipAtMint, lockSlotAtMint, equipFromBalance,
+///           equipAndLockAtMint
+///         - Caches isERC721 on SlotEntry at equip time; postfix integrity
+///           check uses the cached value (closes the type-shifting attack)
+///         - Account-bound unequip disposition — assets remain in the TBA
+///         - Adds the prefix execute-target restriction in execute()
+///           (closes the approval-based bypass)
+///
+///         Binding pattern (bytecode-suffix):
+///         ----------------------------------
+///         (chainId, tokenContract, tokenId) is read directly from this
+///         proxy's immutable bytecode suffix appended by the canonical
+///         ERC-6551 Registry at deploy time. The `token()` function below
+///         issues a single extcodecopy at offset 0x4d, length 0x60.
+///
+///         Spec Security Considerations (under "Parent-contract gating is
+///         bytecode-derived") permits a stored-binding pattern (constructor-
+///         or initializer-set storage) provided that `token()` returns
+///         identical values regardless of caller and that the binding is set
+///         exactly once. The bytecode-suffix path is preferred here because
+///         it inherits its immutability from the canonical 6551 binding and
+///         requires no additional defense — there is no storage location to
+///         compromise via uninitialized initializer, governance, upgrade, or
+///         delegatecall. Implementations that need a different binding
+///         pattern (custom registries, test harnesses) MAY substitute a
+///         stored-binding `token()` and remove this comment.
 contract EquippableAccount is
     IERC6551Account,
     IERC6551Executable,
@@ -26,40 +49,36 @@ contract EquippableAccount is
     ERC1155Holder,
     ERC721Holder
 {
-    // ── Immutables ──
-
-    /// @notice The registry authorized to call initialize() on this implementation.
-    /// @dev    Set in constructor. Bytecode-baked, so all minimal proxy clones see the
-    ///         same value via delegatecall. Defense-in-depth: even though our Registry
-    ///         currently initializes atomically with cloneDeterministic, this check
-    ///         ensures no future deployment pattern can leave a window for front-running.
-    address public immutable REGISTRY;
-
     // ── Storage ──
 
     uint256 private _state;
-    bool private _initialized;
-    uint256 private _chainId;
-    address private _tokenContract;
-    uint256 private _tokenId;
-
     mapping(bytes32 => SlotEntry) private _slots;
     bytes32[] private _occupiedSlots;
     mapping(bytes32 => uint256) private _slotIndex;
 
+    // ── Constants ──
+
+    /// @notice RECOMMENDED upper bound on simultaneously occupied slots. The
+    ///         execute-layer prefix and postfix checks both iterate occupied
+    ///         slots — bounding the count bounds per-execute gas.
+    uint256 public constant MAX_OCCUPIED_SLOTS = 64;
+
     // ── Errors ──
 
     error NotAuthorized();
-    error NotRegistry();
+    error OnlyParentContract();
     error SlotAlreadyOccupied(bytes32 slotId);
     error SlotEmpty(bytes32 slotId);
     error SlotIsLocked(bytes32 slotId);
     error SlotAlreadyLocked(bytes32 slotId);
     error SlotIntegrityViolated(bytes32 slotId);
+    error InsufficientTBABalance(bytes32 slotId);
+    error ExecuteIntoEquippedContract(address to);
     error InvalidAmount();
-    error InvalidTokenType();
     error ArrayLengthMismatch();
-    error AlreadyInitialized();
+    error UnsupportedOperation(uint8 op);
+    error ExecutionFailed(bytes result);
+    error MaxSlotsExceeded();
 
     // ── Modifiers ──
 
@@ -68,37 +87,32 @@ contract EquippableAccount is
         _;
     }
 
-    // ── Constructor ──
-
-    /// @param registry_ Address of the registry authorized to initialize clones of this
-    ///                  implementation. Should be the canonical ERC-6551 Registry singleton
-    ///                  (0x000000006551c19487814612e58FE06813775758) for production deploys.
-    constructor(address registry_) {
-        REGISTRY = registry_;
-    }
-
-    // ── Initializer ──
-
-    function initialize(uint256 chainId_, address tokenContract_, uint256 tokenId_) external {
-        if (msg.sender != REGISTRY) revert NotRegistry();
-        if (_initialized) revert AlreadyInitialized();
-        _initialized = true;
-        _chainId = chainId_;
-        _tokenContract = tokenContract_;
-        _tokenId = tokenId_;
+    /// @dev Restrict to the parent contract address read from the canonical
+    ///      6551 `token()` function. With bytecode-suffix binding the value
+    ///      is mathematically immutable from deploy time.
+    modifier onlyParentContract() {
+        (, address tokenContract,) = token();
+        if (msg.sender != tokenContract) revert OnlyParentContract();
+        _;
     }
 
     // ── ERC-6551 Account ──
 
     receive() external payable override {}
 
+    /// @notice Read (chainId, tokenContract, tokenId) from this proxy's
+    ///         immutable bytecode suffix appended by the canonical registry.
     function token()
         public
         view
         override
         returns (uint256 chainId, address tokenContract, uint256 tokenId)
     {
-        return (_chainId, _tokenContract, _tokenId);
+        bytes memory footer = new bytes(0x60);
+        assembly {
+            extcodecopy(address(), add(footer, 0x20), 0x4d, 0x60)
+        }
+        return abi.decode(footer, (uint256, address, uint256));
     }
 
     function state() external view override returns (uint256) {
@@ -120,30 +134,37 @@ contract EquippableAccount is
     // ── ERC-6551 Execution ──
 
     /// @notice Execute an arbitrary call on behalf of the TBA.
-    /// @dev    After every successful call, verifies that all equipped tokens
-    ///         (locked or unlocked) are still physically held by this account.
-    ///         This is the enforcement layer that prevents bypassing slot locks
-    ///         via direct token transfers initiated through execute().
+    /// @dev    Two-stage equipment integrity:
+    ///         (1) PREFIX — refuse to dispatch any call into a contract that
+    ///             currently appears as `tokenContract` of an occupied slot.
+    ///             Closes the approval-based bypass where execute() could be
+    ///             used to grant standing rights against equipped tokens.
+    ///         (2) POSTFIX — after the external call returns successfully,
+    ///             verify every equipped token is still physically held by
+    ///             this account. Closes the direct-transfer bypass.
     ///
-    ///         Without this check, an owner could call execute() with safeTransferFrom
-    ///         data to drain a locked slot's underlying token, breaking the lock guarantee
-    ///         of ERC-8216 and turning the on-chain equipment record into a lie.
+    ///         CEI: ++_state happens before the external call.
     function execute(
         address to,
         uint256 value,
         bytes calldata data,
         uint8 operation
     ) external payable override onlyOwner returns (bytes memory result) {
-        require(operation == 0, "Only CALL supported");
+        if (operation != 0) revert UnsupportedOperation(operation);
+
+        uint256 occ = _occupiedSlots.length;
+        for (uint256 i; i < occ; ++i) {
+            if (to == _slots[_occupiedSlots[i]].tokenContract) {
+                revert ExecuteIntoEquippedContract(to);
+            }
+        }
+
         ++_state;
 
         bool success;
         (success, result) = to.call{value: value}(data);
-        require(success, "Execution failed");
+        if (!success) revert ExecutionFailed(result);
 
-        // ── Equipment Integrity Check ──
-        // Verify all equipped tokens remain in the account after execution.
-        // This is the enforcement mechanism for slot locks at the execute() layer.
         _verifyEquipmentInvariant();
     }
 
@@ -189,6 +210,42 @@ contract EquippableAccount is
         for (uint256 i; i < slotIds.length; ++i) {
             _lockSlot(slotIds[i]);
         }
+    }
+
+    // ── IERC6551Equipment — Mint-time + balance-only operations ──
+
+    function equipAtMint(
+        bytes32 slotId,
+        address tokenContract,
+        uint256 tokenId,
+        uint256 amount
+    ) external override onlyParentContract {
+        _equipFromTBABalance(slotId, tokenContract, tokenId, amount);
+    }
+
+    function lockSlotAtMint(bytes32 slotId) external override onlyParentContract {
+        _lockSlot(slotId);
+    }
+
+    function equipFromBalance(
+        bytes32 slotId,
+        address tokenContract,
+        uint256 tokenId,
+        uint256 amount
+    ) external override onlyOwner {
+        _equipFromTBABalance(slotId, tokenContract, tokenId, amount);
+    }
+
+    function equipAndLockAtMint(
+        bytes32 slotId,
+        address tokenContract,
+        uint256 tokenId,
+        uint256 amount
+    ) external override onlyParentContract {
+        _equipFromTBABalance(slotId, tokenContract, tokenId, amount);
+        _slots[slotId].locked = true;
+        ++_state;
+        emit SlotLocked(slotId, tokenContract, tokenId);
     }
 
     // ── IERC6551Equipment — Views ──
@@ -242,33 +299,31 @@ contract EquippableAccount is
 
     // ── Internal: Equipment Logic ──
 
-    /// @dev Follows checks-effects-interactions pattern:
-    ///      1. Checks (revert conditions)
-    ///      2. Effects (state updates)
-    ///      3. Interactions (external calls / token transfers)
-    ///
-    ///      Token type detection happens in the interactions phase to preserve CEI
-    ///      ordering. Re-entry from a malicious tokenContract during type detection
-    ///      is gated by onlyOwner and the SlotAlreadyOccupied check (re-entry to the
-    ///      same slot would fail because state has already been written).
+    /// @dev Standard equip with wallet-to-TBA transfer. Token type is
+    ///      detected ONCE here via ERC-165 probe and cached on the slot
+    ///      entry. All later operations consult the cached value — never
+    ///      re-probe.
     function _equip(
         bytes32 slotId,
         address tokenContract,
         uint256 tokenId,
         uint256 amount
     ) internal {
-        // ── Checks ──
         if (_slots[slotId].locked) revert SlotIsLocked(slotId);
         if (_slotIndex[slotId] != 0) revert SlotAlreadyOccupied(slotId);
         if (amount == 0) revert InvalidAmount();
+        if (_occupiedSlots.length >= MAX_OCCUPIED_SLOTS) revert MaxSlotsExceeded();
 
-        // ── Effects (state updates BEFORE external calls) ──
+        bool tokenIs721 = _isERC721(tokenContract);
+        if (tokenIs721 && amount != 1) revert InvalidAmount();
+
         _slots[slotId] = SlotEntry({
             slotId: slotId,
             tokenContract: tokenContract,
             tokenId: tokenId,
             amount: amount,
-            locked: false
+            locked: false,
+            isERC721: tokenIs721
         });
 
         _occupiedSlots.push(slotId);
@@ -276,14 +331,7 @@ contract EquippableAccount is
 
         ++_state;
 
-        // ── Interactions (external calls AFTER state updates) ──
-        bool isERC721 = _isERC721(tokenContract);
-        bool isERC1155 = !isERC721 && _isERC1155(tokenContract);
-
-        if (!isERC721 && !isERC1155) revert InvalidTokenType();
-        if (isERC721 && amount != 1) revert InvalidAmount();
-
-        if (isERC721) {
+        if (tokenIs721) {
             IERC721(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId);
         } else {
             IERC1155(tokenContract).safeTransferFrom(msg.sender, address(this), tokenId, amount, "");
@@ -292,17 +340,32 @@ contract EquippableAccount is
         emit Equipped(slotId, tokenContract, tokenId, amount);
     }
 
-    /// @dev Follows checks-effects-interactions pattern.
+    /// @dev Account-bound unequip disposition — the asset remains in the TBA
+    ///      after the slot is cleared. Symmetric with `equipFromBalance`,
+    ///      which is the path owners use to slot a TBA-resident asset back
+    ///      into a different (or the same, after some other state change)
+    ///      slot. Owner-bound implementations would instead transfer the
+    ///      asset to the caller here:
+    ///
+    ///          if (entry.isERC721) {
+    ///              IERC721(entry.tokenContract).safeTransferFrom(
+    ///                  address(this), msg.sender, entry.tokenId
+    ///              );
+    ///          } else {
+    ///              IERC1155(entry.tokenContract).safeTransferFrom(
+    ///                  address(this), msg.sender, entry.tokenId, entry.amount, ""
+    ///              );
+    ///          }
+    ///
+    ///      The spec leaves disposition implementation-defined; both
+    ///      patterns are conformant. See the Rationale section of ERC-8216.
     function _unequip(bytes32 slotId) internal {
-        // ── Checks ──
         if (_slots[slotId].locked) revert SlotIsLocked(slotId);
         uint256 idx = _slotIndex[slotId];
         if (idx == 0) revert SlotEmpty(slotId);
 
-        // ── Cache before deleting ──
         SlotEntry memory entry = _slots[slotId];
 
-        // ── Effects ──
         uint256 lastIdx = _occupiedSlots.length - 1;
         if (idx - 1 != lastIdx) {
             bytes32 lastSlot = _occupiedSlots[lastIdx];
@@ -315,16 +378,54 @@ contract EquippableAccount is
 
         ++_state;
 
-        // ── Interactions ──
-        if (entry.amount == 1 && _isERC721(entry.tokenContract)) {
-            IERC721(entry.tokenContract).safeTransferFrom(address(this), msg.sender, entry.tokenId);
-        } else {
-            IERC1155(entry.tokenContract).safeTransferFrom(
-                address(this), msg.sender, entry.tokenId, entry.amount, ""
-            );
-        }
+        // Account-bound: asset remains in the TBA balance after slot clear.
 
         emit Unequipped(slotId, entry.tokenContract, entry.tokenId, entry.amount);
+    }
+
+    /// @dev Shared body of `equipAtMint`, `equipFromBalance`, and
+    ///      `equipAndLockAtMint`. Registers a slot pointing at an asset the
+    ///      TBA already holds, with no transfer. Access control is the
+    ///      responsibility of the external entry point.
+    function _equipFromTBABalance(
+        bytes32 slotId,
+        address tokenContract,
+        uint256 tokenId,
+        uint256 amount
+    ) internal {
+        if (_slots[slotId].locked) revert SlotIsLocked(slotId);
+        if (_slotIndex[slotId] != 0) revert SlotAlreadyOccupied(slotId);
+        if (amount == 0) revert InvalidAmount();
+        if (_occupiedSlots.length >= MAX_OCCUPIED_SLOTS) revert MaxSlotsExceeded();
+
+        bool tokenIs721 = _isERC721(tokenContract);
+        if (tokenIs721 && amount != 1) revert InvalidAmount();
+
+        if (tokenIs721) {
+            if (IERC721(tokenContract).ownerOf(tokenId) != address(this)) {
+                revert InsufficientTBABalance(slotId);
+            }
+        } else {
+            if (IERC1155(tokenContract).balanceOf(address(this), tokenId) < amount) {
+                revert InsufficientTBABalance(slotId);
+            }
+        }
+
+        _slots[slotId] = SlotEntry({
+            slotId: slotId,
+            tokenContract: tokenContract,
+            tokenId: tokenId,
+            amount: amount,
+            locked: false,
+            isERC721: tokenIs721
+        });
+
+        _occupiedSlots.push(slotId);
+        _slotIndex[slotId] = _occupiedSlots.length;
+
+        ++_state;
+
+        emit Equipped(slotId, tokenContract, tokenId, amount);
     }
 
     function _lockSlot(bytes32 slotId) internal {
@@ -341,8 +442,9 @@ contract EquippableAccount is
     // ── Internal: Validation ──
 
     function _isValidSigner(address signer) internal view returns (bool) {
-        if (_chainId != block.chainid) return false;
-        return IERC721(_tokenContract).ownerOf(_tokenId) == signer;
+        (uint256 chainId, address tokenContract, uint256 tokenId) = token();
+        if (chainId != block.chainid) return false;
+        return IERC721(tokenContract).ownerOf(tokenId) == signer;
     }
 
     function _isERC721(address tokenContract) internal view returns (bool) {
@@ -353,34 +455,25 @@ contract EquippableAccount is
         }
     }
 
-    function _isERC1155(address tokenContract) internal view returns (bool) {
-        try IERC165(tokenContract).supportsInterface(type(IERC1155).interfaceId) returns (bool result) {
-            return result;
-        } catch {
-            return false;
-        }
-    }
-
-    /// @dev Reverts if any equipped token is no longer physically held by this account.
-    ///      Called after execute() to enforce slot integrity at the execution layer.
-    ///      Iterates over _occupiedSlots and verifies via ownerOf (ERC-721) or
-    ///      balanceOf (ERC-1155) that the recorded token is still present.
-    ///
-    ///      Gas cost: ~30k per occupied slot (one external call each).
-    ///      For a typical 10-slot character: ~300k gas overhead per execute().
-    ///      For a maximalist 50-slot character: ~1.5M gas overhead per execute().
+    /// @dev Postfix integrity check. Reads the cached `isERC721` field on
+    ///      each slot entry rather than re-probing the token contract —
+    ///      re-probing would open the type-shifting attack documented in
+    ///      Security Considerations.
     function _verifyEquipmentInvariant() internal view {
         uint256 len = _occupiedSlots.length;
         for (uint256 i; i < len; ++i) {
             bytes32 slotId = _occupiedSlots[i];
             SlotEntry memory entry = _slots[slotId];
 
-            if (_isERC721(entry.tokenContract)) {
+            if (entry.isERC721) {
                 if (IERC721(entry.tokenContract).ownerOf(entry.tokenId) != address(this)) {
                     revert SlotIntegrityViolated(slotId);
                 }
             } else {
-                if (IERC1155(entry.tokenContract).balanceOf(address(this), entry.tokenId) < entry.amount) {
+                if (
+                    IERC1155(entry.tokenContract).balanceOf(address(this), entry.tokenId)
+                        < entry.amount
+                ) {
                     revert SlotIntegrityViolated(slotId);
                 }
             }

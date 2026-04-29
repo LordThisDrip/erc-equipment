@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 pragma solidity ^0.8.24;
 
-/// @title IERC6551Equipment — Slot-Based Equipment for Token Bound Accounts
+/// @title IERC6551Equipment — Slot-Based Equipment for Token Bound Accounts (v1.2)
 /// @notice A standard interface for equipping, unequipping, and permanently
 ///         locking tokens within ERC-6551 Token Bound Accounts using named slots.
 /// @dev    Slots are identified by bytes32 keys, allowing any application to
@@ -14,17 +14,23 @@ pragma solidity ^0.8.24;
 ///         ownership transfers. Locked means locked forever — there is no
 ///         unlock mechanism by design.
 ///
-///         The ERC-165 identifier for this interface is 0xd38f0891.
+///         The ERC-165 identifier for this interface is 0xc1ef0b9e.
 
 interface IERC6551Equipment {
 
     /// @notice Metadata describing an occupied equipment slot.
+    /// @dev    `isERC721` is cached at equip time via ERC-165 probe and is
+    ///         immutable for the lifetime of the slot occupation.
+    ///         Implementations MUST NOT re-probe the token contract's
+    ///         interface during any subsequent operation — see the
+    ///         Type-shifting defense in Security Considerations.
     struct SlotEntry {
         bytes32 slotId;
         address tokenContract;
         uint256 tokenId;
         uint256 amount;
         bool locked;
+        bool isERC721;
     }
 
     event Equipped(
@@ -69,4 +75,47 @@ interface IERC6551Equipment {
     function isSlotOccupied(bytes32 slotId) external view returns (bool);
 
     function isSlotLocked(bytes32 slotId) external view returns (bool);
+
+    /// @notice Register an item already held in the TBA balance into a slot.
+    ///         Performs no transfer.
+    /// @dev    Implementations MUST restrict access to the parent contract
+    ///         (the `tokenContract` returned by `token()`). The balance
+    ///         condition uses `>= amount` for ERC-1155 and
+    ///         `ownerOf == address(this)` for ERC-721, matching the
+    ///         postfix integrity check tolerance.
+    function equipAtMint(
+        bytes32 slotId,
+        address tokenContract,
+        uint256 tokenId,
+        uint256 amount
+    ) external;
+
+    /// @notice Lock a slot occupied by `equipAtMint`.
+    /// @dev    Implementations MUST restrict access to the parent contract.
+    function lockSlotAtMint(bytes32 slotId) external;
+
+    /// @notice Equip an item already held in the TBA balance into a slot.
+    ///         Performs no transfer.
+    /// @dev    Implementations MUST restrict access to the NFT owner. Same
+    ///         balance condition as `equipAtMint`.
+    function equipFromBalance(
+        bytes32 slotId,
+        address tokenContract,
+        uint256 tokenId,
+        uint256 amount
+    ) external;
+
+    /// @notice Atomically register an item already held in the TBA balance
+    ///         into a slot AND lock it. Performs no transfer.
+    /// @dev    Implementations MUST restrict access to the parent contract.
+    ///         Implementations MUST emit BOTH `Equipped` and `SlotLocked`
+    ///         events. The post-state MUST be identical to calling
+    ///         `equipAtMint` followed by `lockSlotAtMint` with the same
+    ///         arguments.
+    function equipAndLockAtMint(
+        bytes32 slotId,
+        address tokenContract,
+        uint256 tokenId,
+        uint256 amount
+    ) external;
 }
